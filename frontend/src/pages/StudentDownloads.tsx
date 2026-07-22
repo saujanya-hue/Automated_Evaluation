@@ -71,7 +71,7 @@ export const StudentDownloads: React.FC = () => {
     <div className="space-y-6 animate-in fade-in duration-200">
       <div>
         <h2 className="text-lg font-bold text-foreground">Scanned Document & Report Downloads</h2>
-        <p className="text-xs text-muted-foreground mt-0.5">Download original script scans, Azure OCR text transcripts, or compiled evaluations.</p>
+        <p className="text-xs text-muted-foreground mt-0.5">Download original script scans, Gemini OCR text transcripts, or compiled evaluations.</p>
       </div>
 
       <div className="glass-panel rounded-2xl overflow-hidden shadow-2xl">

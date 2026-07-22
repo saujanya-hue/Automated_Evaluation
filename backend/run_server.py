@@ -5,6 +5,10 @@ import os
 current_dir = os.path.abspath(os.path.dirname(__file__))
 sys.path.insert(0, current_dir)
 
+# Load environment variables from .env file
+from dotenv import load_dotenv
+load_dotenv(os.path.join(current_dir, ".env"))
+
 import uvicorn
 
 if __name__ == "__main__":

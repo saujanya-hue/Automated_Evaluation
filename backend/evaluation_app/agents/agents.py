@@ -27,38 +27,66 @@ class EvaluationState(TypedDict):
     errors: List[str]
 
 # ----------------------------------------------------
-# Node 1: Document Understanding Agent (OCR)
+# Node 1: Document Understanding Agent (OCR — Gemini 2.5 Flash)
 # ----------------------------------------------------
 def document_understanding_agent(state: EvaluationState) -> EvaluationState:
     logger.info(f"--- Document Understanding Agent: Processing Answer Sheet {state['answer_sheet_id']} ---")
-    
+
     scanned_url = state.get("scanned_file_url", "")
-    ocr_endpoint = os.getenv("AZURE_DOCUMENT_INTELLIGENCE_ENDPOINT")
-    ocr_key = os.getenv("AZURE_DOCUMENT_INTELLIGENCE_KEY")
-    
-    raw_text = ""
-    structured_transcript = {}
-    
-    if ocr_endpoint and ocr_key:
+    gemini_key = os.getenv("GEMINI_API_KEY")
+
+    raw_text = None
+
+    # Use Gemini 2.5 Flash for OCR (multimodal vision)
+    if gemini_key:
         try:
-            logger.info("Connecting to Azure Document Intelligence...")
-            from azure.ai.formrecognizer import DocumentAnalysisClient
-            from azure.core.credentials import AzureKeyCredential
-            
-            client = DocumentAnalysisClient(ocr_endpoint, AzureKeyCredential(ocr_key))
-            # In production, we would pass a URL or stream:
-            # poller = client.begin_analyze_document_from_url("prebuilt-read", scanned_url)
-            # result = poller.result()
-            # raw_text = "\n".join([line.content for page in result.pages for line in page.lines])
-            
-            # Simple simulation placeholder representing Azure OCR output for demo files
-            raw_text = "Q1: Explain polymorphism in Object Oriented Programming with a simple code snippet.\nStudent Answer: Polymorphism means many forms. It allows objects of different classes to be treated as objects of a common superclass. For example, a method 'draw()' can behave differently for Class Circle and Class Square. \n\nQ2: What is the time complexity of binary search? Explain with justification.\nStudent Answer: Binary search runs in O(log n) time. It works by repeatedly dividing the search interval in half. Each step cuts the search space by half, so 2^k = n, which implies k = log2(n) steps."
+            logger.info("Connecting to Gemini 2.5 Flash for OCR (Document Understanding)...")
+            import base64, requests as _req
+
+            # Read file bytes — handle local filesystem paths or remote URLs
+            if scanned_url and os.path.exists(scanned_url):
+                with open(scanned_url, "rb") as f:
+                    file_bytes = f.read()
+                ext = os.path.splitext(scanned_url)[1].lower()
+                mime_type = "application/pdf" if ext == ".pdf" else "image/png" if ext == ".png" else "image/jpeg"
+            elif scanned_url and scanned_url.startswith("http"):
+                img_resp = _req.get(scanned_url, timeout=10)
+                img_resp.raise_for_status()
+                file_bytes = img_resp.content
+                mime_type = "image/jpeg"
+            else:
+                raise ValueError(f"No valid file path or URL provided: '{scanned_url}'")
+
+            img_b64 = base64.b64encode(file_bytes).decode("utf-8")
+            gemini_ocr_url = (
+                f"https://generativelanguage.googleapis.com/v1beta/models/"
+                f"gemini-flash-latest:generateContent?key={gemini_key}"
+            )
+            payload = {
+                "contents": [{
+                    "role": "user",
+                    "parts": [
+                        {"inline_data": {"mime_type": mime_type, "data": img_b64}},
+                        {"text": (
+                            "You are an advanced OCR and document understanding engine. "
+                            "Extract ALL text from this answer-sheet image exactly as written. "
+                            "Preserve question numbers, student answers, and any code snippets. "
+                            "Output plain text only, maintaining the original structure."
+                        )}
+                    ]
+                }],
+                "generationConfig": {"temperature": 0}
+            }
+            resp = _req.post(gemini_ocr_url, json=payload, timeout=60)
+            resp.raise_for_status()
+            raw_text = resp.json()["candidates"][0]["content"]["parts"][0]["text"]
+            logger.info("Gemini 2.5 Flash OCR completed successfully.")
         except Exception as e:
-            logger.error(f"Azure OCR error: {e}. Falling back to simulation.")
-            state["errors"].append(f"Azure OCR failed: {str(e)}")
+            logger.error(f"Gemini 2.5 Flash OCR failed: {e}. Falling back to simulation.")
+            state["errors"].append(f"Gemini OCR failed: {str(e)}")
             raw_text = None
-    
-    # If no credentials, or Azure failed, use realistic fallback transcripts
+
+    # Simulation fallback when no API key is configured
     if not raw_text:
         logger.info("Using simulated high-fidelity OCR transcript.")
         raw_text = (
@@ -121,7 +149,7 @@ def evaluation_agent(state: EvaluationState) -> EvaluationState:
             import requests
             
             headers = {"Content-Type": "application/json"}
-            url = f"https://generativetoolkit.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={gemini_key}"
+            url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-flash-latest:generateContent?key={gemini_key}"
             
             for sec in sections:
                 q_num = sec["question_number"]

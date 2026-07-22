@@ -164,7 +164,7 @@ export const FacultyEvaluation: React.FC = () => {
 
   const steps = [
     { label: 'Question Paper Parsing', desc: 'Analyzing structured questions & points bounds' },
-    { label: 'Document Layout Extraction', desc: 'Azure Document Intelligence parsing segments' },
+    { label: 'Document Layout Extraction', desc: 'Gemini 2.5 Flash document understanding segments' },
     { label: 'OCR Handwriting Transcription', desc: 'Extracting student text character strings' },
     { label: 'Question Mapping', desc: 'Aligning segmented answers to paper questions' },
     { label: 'AI Evaluation & Scoring', desc: 'Gemini 2.5 Flash executing examiner criteria' },
@@ -337,7 +337,7 @@ export const FacultyEvaluation: React.FC = () => {
                     <span>Structured OCR Transcript</span>
                     <span className="text-emerald-400 font-semibold flex items-center gap-0.5">
                       <Sparkles className="w-3 h-3 animate-spin" />
-                      <span>Azure Extract</span>
+                      <span>Gemini Extract</span>
                     </span>
                   </div>
                   <div className="flex-1 overflow-y-auto py-3 text-xs leading-relaxed text-muted-foreground font-mono space-y-3">

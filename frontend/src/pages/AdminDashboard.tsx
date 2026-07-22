@@ -115,7 +115,7 @@ export const AdminDashboard: React.FC = () => {
             <div className="flex items-start gap-3 p-3 rounded-xl bg-emerald-950/20 border border-emerald-500/20 text-emerald-400">
               <CheckCircle2 className="w-5 h-5 shrink-0" />
               <div className="flex flex-col gap-0.5">
-                <span className="text-xs font-bold">Azure OCR Engine - Active</span>
+                <span className="text-xs font-bold">Gemini 2.5 Flash OCR - Active</span>
                 <span className="text-[10px] text-muted-foreground">Successfully pinged endpoint. OCR pipeline is running.</span>
               </div>
             </div>

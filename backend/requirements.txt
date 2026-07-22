@@ -5,5 +5,5 @@ passlib[bcrypt]
 python-jose[cryptography]
 python-multipart
 requests
-azure-ai-formrecognizer
+python-dotenv
 pydantic[email]>=2.9.0
