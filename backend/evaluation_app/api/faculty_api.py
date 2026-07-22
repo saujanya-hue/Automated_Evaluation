@@ -1,0 +1,379 @@
+from fastapi import APIRouter, Depends, HTTPException, status, UploadFile, File, BackgroundTasks
+from sqlalchemy.orm import Session
+from typing import List, Dict, Any
+import os
+import shutil
+
+from evaluation_app.database.session import get_db
+from evaluation_app.models.models import (
+    User, Faculty, FacultyAssignment, Exam, AnswerSheet, EvaluationResult, OCRTranscript, Student, Complaint, Subject, Class
+)
+from evaluation_app.schemas.schemas import (
+    ExamCreate, ExamResponse, AnswerSheetResponse, EvaluationResultResponse, EvaluationOverride, ComplaintResponse, ComplaintUpdate
+)
+from evaluation_app.api.dependencies import RoleChecker, get_current_user
+from evaluation_app.agents.agents import run_evaluation_pipeline
+
+router = APIRouter(prefix="/faculty", tags=["Faculty Portal"])
+faculty_only = Depends(RoleChecker(["faculty"]))
+
+# Helper: Get Faculty DB object from Current User
+def get_faculty_profile(current_user: User, db: Session) -> Faculty:
+    fac = db.query(Faculty).filter(Faculty.user_id == current_user.id).first()
+    if not fac:
+        raise HTTPException(status_code=403, detail="Faculty profile not found")
+    return fac
+
+@router.get("/dashboard-stats", dependencies=[faculty_only])
+def get_dashboard_stats(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    fac = get_faculty_profile(current_user, db)
+    # Count of subjects assigned
+    sub_count = db.query(FacultyAssignment).filter(FacultyAssignment.faculty_id == fac.id).distinct(FacultyAssignment.subject_id).count()
+    # Count of classes assigned
+    cls_count = db.query(FacultyAssignment).filter(FacultyAssignment.faculty_id == fac.id).distinct(FacultyAssignment.class_id).count()
+    # Count of exams created
+    assigned_subject_ids = [a.subject_id for a in fac.assignments]
+    exams_count = db.query(Exam).filter(Exam.subject_id.in_(assigned_subject_ids)).count() if assigned_subject_ids else 0
+    # Pending complaints
+    complaints_count = db.query(Complaint).join(AnswerSheet).filter(AnswerSheet.exam_id.in_(
+        db.query(Exam.id).filter(Exam.subject_id.in_(assigned_subject_ids))
+    )).filter(Complaint.status == "raised").count() if assigned_subject_ids else 0
+    
+    return {
+        "subjects": sub_count,
+        "classes": cls_count,
+        "exams": exams_count,
+        "pending_complaints": complaints_count
+    }
+
+@router.get("/my-subjects", dependencies=[faculty_only])
+def list_my_subjects(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    fac = get_faculty_profile(current_user, db)
+    assignments = db.query(FacultyAssignment).filter(FacultyAssignment.faculty_id == fac.id).all()
+    subjects = []
+    seen = set()
+    for a in assignments:
+        if a.subject_id not in seen:
+            seen.add(a.subject_id)
+            subjects.append({
+                "id": a.subject.id,
+                "name": a.subject.name,
+                "code": a.subject.code
+            })
+    return subjects
+
+@router.get("/my-classes", dependencies=[faculty_only])
+def list_my_classes(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    fac = get_faculty_profile(current_user, db)
+    assignments = db.query(FacultyAssignment).filter(FacultyAssignment.faculty_id == fac.id).all()
+    classes = []
+    seen = set()
+    for a in assignments:
+        if a.class_id not in seen:
+            seen.add(a.class_id)
+            classes.append({
+                "id": a.student_class.id,
+                "name": a.student_class.name,
+                "batch_year": a.student_class.batch_year
+            })
+    return classes
+
+# --- EXAMS ---
+@router.get("/exams", response_model=List[ExamResponse], dependencies=[faculty_only])
+def list_exams(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    fac = get_faculty_profile(current_user, db)
+    sub_ids = [a.subject_id for a in fac.assignments]
+    if not sub_ids:
+        return []
+    return db.query(Exam).filter(Exam.subject_id.in_(sub_ids)).all()
+
+@router.post("/exams", response_model=ExamResponse, dependencies=[faculty_only])
+def create_exam(exam: ExamCreate, db: Session = Depends(get_db)):
+    db_exam = Exam(
+        title=exam.title,
+        subject_id=exam.subject_id,
+        class_id=exam.class_id,
+        max_marks=exam.max_marks,
+        passing_marks=exam.passing_marks,
+        status="draft"
+    )
+    db.add(db_exam)
+    db.commit()
+    db.refresh(db_exam)
+    return db_exam
+
+# --- UPLOAD AND AI RUNNER ---
+def process_evaluation_task(exam_id: int, answer_sheet_id: int, student_id: int, file_path: str):
+    logger_msg = f"Starting background evaluation job for Sheet {answer_sheet_id}"
+    print(logger_msg)
+    try:
+        run_evaluation_pipeline(
+            exam_id=exam_id,
+            answer_sheet_id=answer_sheet_id,
+            student_id=student_id,
+            file_path=file_path
+        )
+    except Exception as e:
+        print(f"Error in background task grading sheet {answer_sheet_id}: {e}")
+
+@router.post("/exams/{exam_id}/upload-answer-sheets", dependencies=[faculty_only])
+def upload_answer_sheets(
+    exam_id: int,
+    background_tasks: BackgroundTasks,
+    file: UploadFile = File(...),
+    db: Session = Depends(get_db)
+):
+    exam = db.query(Exam).filter(Exam.id == exam_id).first()
+    if not exam:
+        raise HTTPException(status_code=404, detail="Exam not found")
+        
+    # In a full production system, we would unzip a ZIP containing several students' sheets
+    # named like [roll_number].pdf or [roll_number].jpg.
+    # For this implementation, we will simulate this by creating evaluation runs for students in that class.
+    # Find all students assigned to this exam's class
+    students = db.query(Student).filter(Student.class_id == exam.class_id).all()
+    if not students:
+        raise HTTPException(status_code=400, detail="No students registered in this class yet")
+        
+    # Save the file locally
+    os.makedirs("./uploads/exams", exist_ok=True)
+    file_path = f"./uploads/exams/exam_{exam_id}_{file.filename}"
+    with open(file_path, "wb") as buffer:
+        shutil.copyfileobj(file.file, buffer)
+        
+    # Update Exam status
+    exam.status = "evaluating"
+    db.commit()
+    
+    # Trigger background evaluation jobs for all students in the class
+    sheets_triggered = []
+    for s in students:
+        # Create AnswerSheet record
+        sheet = db.query(AnswerSheet).filter(AnswerSheet.exam_id == exam_id, AnswerSheet.student_id == s.id).first()
+        if not sheet:
+            sheet = AnswerSheet(
+                exam_id=exam_id,
+                student_id=s.id,
+                scanned_file_url=file_path,
+                status="evaluating"
+            )
+            db.add(sheet)
+            db.flush()
+        else:
+            sheet.status = "evaluating"
+            sheet.scanned_file_url = file_path
+            db.flush()
+            
+        background_tasks.add_task(
+            process_evaluation_task,
+            exam_id=exam_id,
+            answer_sheet_id=sheet.id,
+            student_id=s.id,
+            file_path=file_path
+        )
+        sheets_triggered.append(sheet.id)
+        
+    db.commit()
+    return {"message": "Upload successful. Evaluation processing started in background.", "answer_sheets": sheets_triggered}
+
+# --- EVALUATION AND RESULTS ---
+@router.get("/exams/{exam_id}/answer-sheets", response_model=List[AnswerSheetResponse], dependencies=[faculty_only])
+def get_exam_answer_sheets(exam_id: int, db: Session = Depends(get_db)):
+    sheets = db.query(AnswerSheet).filter(AnswerSheet.exam_id == exam_id).all()
+    enriched = []
+    for s in sheets:
+        enriched.append({
+            "id": s.id,
+            "exam_id": s.exam_id,
+            "student_id": s.student_id,
+            "scanned_file_url": s.scanned_file_url,
+            "total_marks": s.total_marks,
+            "grade": s.grade,
+            "status": s.status,
+            "reviewer_remarks": s.reviewer_remarks,
+            "created_at": s.created_at,
+            "student_roll": s.student.roll_number if s.student else "N/A",
+            "student_name": s.student.user.name if s.student and s.student.user else "Unknown"
+        })
+    return enriched
+
+@router.get("/answer-sheets/{sheet_id}/evaluation", dependencies=[faculty_only])
+def get_detailed_evaluation(sheet_id: int, db: Session = Depends(get_db)):
+    sheet = db.query(AnswerSheet).filter(AnswerSheet.id == sheet_id).first()
+    if not sheet:
+        raise HTTPException(status_code=404, detail="Answer sheet not found")
+        
+    ocr = db.query(OCRTranscript).filter(OCRTranscript.answer_sheet_id == sheet_id).first()
+    results = db.query(EvaluationResult).filter(EvaluationResult.answer_sheet_id == sheet_id).all()
+    
+    return {
+        "sheet": {
+            "id": sheet.id,
+            "total_marks": sheet.total_marks,
+            "grade": sheet.grade,
+            "status": sheet.status,
+            "reviewer_remarks": sheet.reviewer_remarks,
+            "student_name": sheet.student.user.name if sheet.student else "Student"
+        },
+        "ocr": {
+            "raw_text": ocr.raw_text if ocr else "",
+            "structured": ocr.structured_transcript_json if ocr else {}
+        },
+        "results": [
+            {
+                "id": r.id,
+                "question_number": r.question_number,
+                "max_marks": r.max_marks,
+                "marks_obtained": r.marks_obtained,
+                "feedback": r.feedback,
+                "confidence_score": r.confidence_score,
+                "status": r.status
+            } for r in results
+        ]
+    }
+
+@router.put("/evaluation/{result_id}/override", dependencies=[faculty_only])
+def override_marks(result_id: int, override: EvaluationOverride, db: Session = Depends(get_db)):
+    res = db.query(EvaluationResult).filter(EvaluationResult.id == result_id).first()
+    if not res:
+        raise HTTPException(status_code=404, detail="Evaluation question result not found")
+        
+    res.marks_obtained = override.marks_obtained
+    res.feedback = override.feedback
+    res.status = "edited"
+    db.commit()
+    
+    # Recalculate total marks on answer sheet
+    sheet = db.query(AnswerSheet).filter(AnswerSheet.id == res.answer_sheet_id).first()
+    if sheet:
+        results = db.query(EvaluationResult).filter(EvaluationResult.answer_sheet_id == sheet.id).all()
+        new_total = sum([r.marks_obtained for r in results])
+        sheet.total_marks = new_total
+        # Recalculate grade based on 20 max marks
+        pct = (new_total / 20.0) * 100.0
+        if pct >= 85: sheet.grade = "A+"
+        elif pct >= 75: sheet.grade = "A"
+        elif pct >= 60: sheet.grade = "B"
+        elif pct >= 40: sheet.grade = "C"
+        else: sheet.grade = "F"
+        db.commit()
+        
+    return {"message": "Marks successfully overridden"}
+
+@router.put("/answer-sheets/{sheet_id}/approve", dependencies=[faculty_only])
+def approve_answer_sheet(sheet_id: int, remarks: Dict[str, str], db: Session = Depends(get_db)):
+    sheet = db.query(AnswerSheet).filter(AnswerSheet.id == sheet_id).first()
+    if not sheet:
+        raise HTTPException(status_code=404, detail="Answer sheet not found")
+        
+    sheet.status = "reviewed"
+    sheet.reviewer_remarks = remarks.get("remarks", "Approved by Faculty")
+    db.commit()
+    return {"message": "Answer sheet marked as reviewed"}
+
+@router.put("/exams/{exam_id}/publish", dependencies=[faculty_only])
+def publish_results(exam_id: int, db: Session = Depends(get_db)):
+    exam = db.query(Exam).filter(Exam.id == exam_id).first()
+    if not exam:
+        raise HTTPException(status_code=404, detail="Exam not found")
+    exam.status = "completed"
+    db.commit()
+    return {"message": "Exam results successfully published to students"}
+
+# --- ANALYTICS ---
+@router.get("/exams/{exam_id}/analytics", dependencies=[faculty_only])
+def get_exam_analytics(exam_id: int, db: Session = Depends(get_db)):
+    sheets = db.query(AnswerSheet).filter(AnswerSheet.exam_id == exam_id, AnswerSheet.status != "evaluating").all()
+    if not sheets:
+        return {"average": 0, "highest": 0, "lowest": 0, "pass_rate": 0, "grades": {}, "top_performers": []}
+        
+    scores = [s.total_marks for s in sheets]
+    avg = sum(scores) / len(scores)
+    highest = max(scores)
+    lowest = min(scores)
+    
+    # Passing marks defaults to 40% (8 marks out of 20)
+    passed = len([s for s in sheets if s.total_marks >= 8])
+    pass_rate = (passed / len(sheets)) * 100
+    
+    grades = {}
+    for s in sheets:
+        g = s.grade or "F"
+        grades[g] = grades.get(g, 0) + 1
+        
+    # Top Performers
+    top_performers = sorted(sheets, key=lambda s: s.total_marks, reverse=True)[:5]
+    top_list = [{
+        "student_name": t.student.user.name,
+        "roll_number": t.student.roll_number,
+        "total_marks": t.total_marks,
+        "grade": t.grade
+    } for t in top_performers]
+    
+    # Question wise average performance
+    # Question 1 & Question 2 averages
+    q1_scores = db.query(EvaluationResult.marks_obtained).join(AnswerSheet).filter(AnswerSheet.exam_id == exam_id, EvaluationResult.question_number == "1").all()
+    q2_scores = db.query(EvaluationResult.marks_obtained).join(AnswerSheet).filter(AnswerSheet.exam_id == exam_id, EvaluationResult.question_number == "2").all()
+    
+    q1_avg = sum([s[0] for s in q1_scores]) / len(q1_scores) if q1_scores else 0
+    q2_avg = sum([s[0] for s in q2_scores]) / len(q2_scores) if q2_scores else 0
+    
+    return {
+        "average": round(avg, 2),
+        "highest": round(highest, 2),
+        "lowest": round(lowest, 2),
+        "pass_rate": round(pass_rate, 2),
+        "grades": grades,
+        "top_performers": top_list,
+        "question_performance": [
+            {"question": "Q1 (Polymorphism)", "average_score": round(q1_avg, 2), "max": 10},
+            {"question": "Q2 (Binary Search)", "average_score": round(q2_avg, 2), "max": 10}
+        ]
+    }
+
+# --- COMPLAINTS ---
+@router.get("/complaints", response_model=List[ComplaintResponse], dependencies=[faculty_only])
+def list_faculty_complaints(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    fac = get_faculty_profile(current_user, db)
+    assigned_subject_ids = [a.subject_id for a in fac.assignments]
+    if not assigned_subject_ids:
+        return []
+        
+    complaints = db.query(Complaint).join(AnswerSheet).filter(
+        AnswerSheet.exam_id.in_(
+            db.query(Exam.id).filter(Exam.subject_id.in_(assigned_subject_ids))
+        )
+    ).all()
+    
+    res = []
+    for c in complaints:
+        res.append({
+            "id": c.id,
+            "answer_sheet_id": c.answer_sheet_id,
+            "student_id": c.student_id,
+            "category": c.category,
+            "description": c.description,
+            "status": c.status,
+            "resolution_remarks": c.resolution_remarks,
+            "created_at": c.created_at,
+            "resolved_at": c.resolved_at,
+            "student_name": c.student.user.name if c.student else "Student",
+            "exam_title": c.answer_sheet.exam.title if c.answer_sheet and c.answer_sheet.exam else "Exam"
+        })
+    return res
+
+@router.put("/complaints/{id}", dependencies=[faculty_only])
+def resolve_complaint(id: int, update: ComplaintUpdate, db: Session = Depends(get_db)):
+    comp = db.query(Complaint).filter(Complaint.id == id).first()
+    if not comp:
+        raise HTTPException(status_code=404, detail="Complaint not found")
+        
+    comp.status = update.status
+    comp.resolution_remarks = update.resolution_remarks
+    import datetime
+    comp.resolved_at = datetime.datetime.utcnow()
+    
+    # If the faculty decided to reject or accept, update state.
+    # In a full system, status = "re-evaluate" triggers re-evaluation pipeline.
+    db.commit()
+    return {"message": "Complaint status updated successfully"}

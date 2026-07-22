@@ -1,0 +1,9 @@
+fastapi>=0.115.0
+uvicorn>=0.30.0
+sqlalchemy>=2.0.30
+passlib[bcrypt]
+python-jose[cryptography]
+python-multipart
+requests
+azure-ai-formrecognizer
+pydantic[email]>=2.9.0
