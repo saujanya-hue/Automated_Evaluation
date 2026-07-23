@@ -55,15 +55,21 @@ export const FacultyEvaluation: React.FC = () => {
       const data = await apiService.getExamAnswerSheets(examId);
       setAnswerSheets(data);
       
-      // Determine if a mock pipeline is running
-      // If any sheet is 'evaluating', simulate the timeline steps
+      // Check if any sheet is still evaluating
       const isEvaluating = data.some((s: any) => s.status === 'evaluating');
       if (isEvaluating) {
         setPipelineRunning(true);
-        simulatePipeline(examId);
+        // Advance pipeline step visually based on how many sheets are done
+        const doneCount = data.filter((s: any) => s.status !== 'evaluating').length;
+        const newStep = Math.min(doneCount + 1, 5);
+        setPipelineStep(prev => Math.max(prev, newStep));
       } else {
+        if (pipelineRunning) {
+          // Just finished evaluating — show all steps complete
+          setPipelineStep(6);
+          showToast('AI pipeline completed grading successfully', 'success');
+        }
         setPipelineRunning(false);
-        setPipelineStep(6);
       }
     } catch (err) {
       showToast('Failed to load answer sheets', 'error');
@@ -80,22 +86,14 @@ export const FacultyEvaluation: React.FC = () => {
     }
   }, [selectedExamId]);
 
-  const simulatePipeline = (examId: number) => {
-    setPipelineStep(0);
-    const intervals = [1000, 2000, 3500, 5000, 6500, 8000];
-    
-    intervals.forEach((time, index) => {
-      setTimeout(() => {
-        setPipelineStep(index + 1);
-        if (index === intervals.length - 1) {
-          setPipelineRunning(false);
-          // Reload sheets since database status will be updated to 'evaluated'
-          fetchSheets(examId);
-          showToast('AI pipeline completed grading successfully', 'success');
-        }
-      }, time);
-    });
-  };
+  // Real polling: while any sheet is evaluating, re-fetch every 4 seconds
+  useEffect(() => {
+    if (!pipelineRunning || !selectedExamId) return;
+    const interval = setInterval(() => {
+      fetchSheets(selectedExamId);
+    }, 4000);
+    return () => clearInterval(interval);
+  }, [pipelineRunning, selectedExamId]);
 
   const loadDetailedEvaluation = async (sheetId: number) => {
     setLoadingDetail(true);
@@ -164,10 +162,10 @@ export const FacultyEvaluation: React.FC = () => {
 
   const steps = [
     { label: 'Question Paper Parsing', desc: 'Analyzing structured questions & points bounds' },
-    { label: 'Document Layout Extraction', desc: 'Gemini 2.5 Flash document understanding segments' },
+    { label: 'Document Layout Extraction', desc: 'GPT OSS 120B Cloud document understanding segments' },
     { label: 'OCR Handwriting Transcription', desc: 'Extracting student text character strings' },
     { label: 'Question Mapping', desc: 'Aligning segmented answers to paper questions' },
-    { label: 'AI Evaluation & Scoring', desc: 'Gemini 2.5 Flash executing examiner criteria' },
+    { label: 'AI Evaluation & Scoring', desc: 'GPT OSS 120B Cloud executing examiner criteria' },
     { label: 'Compilation & Final Reports', desc: 'Assembling scoring tables and matrices' },
   ];
 
@@ -337,7 +335,7 @@ export const FacultyEvaluation: React.FC = () => {
                     <span>Structured OCR Transcript</span>
                     <span className="text-emerald-400 font-semibold flex items-center gap-0.5">
                       <Sparkles className="w-3 h-3 animate-spin" />
-                      <span>Gemini Extract</span>
+                      <span>Ollama Extract</span>
                     </span>
                   </div>
                   <div className="flex-1 overflow-y-auto py-3 text-xs leading-relaxed text-muted-foreground font-mono space-y-3">

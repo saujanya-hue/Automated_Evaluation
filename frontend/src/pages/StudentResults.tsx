@@ -163,7 +163,7 @@ export const StudentResults: React.FC = () => {
                     <span>OCR Handwriting Extraction</span>
                     <span className="text-emerald-400 font-semibold flex items-center gap-0.5">
                       <Sparkles className="w-3 h-3 animate-spin" />
-                      <span>Gemini Extract</span>
+                      <span>Ollama Extract</span>
                     </span>
                   </div>
                   <div className="flex-1 overflow-y-auto py-3 text-xs leading-relaxed text-muted-foreground font-mono space-y-3">

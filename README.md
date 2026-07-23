@@ -1,6 +1,6 @@
 # AI-Powered Automated Answer Script Evaluation System
 
-An enterprise-scale automated grading and script audit platform for universities. The application utilizes a FastAPI backend running three **LangGraph AI agents** powered by **Gemini 2.5 Flash** and **Azure Document Intelligence OCR**, connected to a multi-portal **React 19 + TypeScript + Tailwind CSS** frontend dashboard.
+An enterprise-scale automated grading and script audit platform for universities. The application utilizes a FastAPI backend running three **LangGraph AI agents** powered by **Ollama (gpt-oss:120b-cloud)** OCR & Evaluation engine, connected to a multi-portal **React 19 + TypeScript + Tailwind CSS** frontend dashboard.
 
 ---
 
@@ -27,7 +27,7 @@ answer_script/
 │       │   ├── faculty_api.py      # Exam creation, background OCR/grading tasks launcher, overrides, complaints review
 │       │   └── student_api.py      # Result auditing, OCR side-by-side inspector, and complaint desk ticket creator
 │       └── agents/
-│           └── agents.py           # LangGraph-compatible state workflow (OCR, Gemini evaluation, report builder)
+│           └── agents.py           # LangGraph-compatible state workflow (OCR, Ollama evaluation, report builder)
 └── frontend/
     ├── package.json                # Node modules (React 19, Vite, Tailwind CSS, Lucide, Recharts, Framer Motion)
     ├── vite.config.ts              # Vite compiler configuration
@@ -80,10 +80,10 @@ answer_script/
 * **Role-Based Access Control**: Decorators and dependency checking blocks unauthorized users from hitting endpoints belonging to other portals.
 
 ### 3. LangGraph AI Agent Workflow (`backend/app/agents/`)
-* **Agent 1: Document Understanding Node**: Connects to Azure Document Intelligence. Submits scanned sheets, extracts handwriting transcripts, segments pages, and structures mapped answers into JSON.
-* **Agent 2: Evaluation Node**: Invokes Gemini 2.5 Flash to grade answers based on correctness, clarity, relevance, and completeness, producing feedback and grading confidence scores.
+* **Agent 1: Document Understanding Node**: Connects to Ollama (`gpt-oss:120b-cloud`) vision engine. Submits scanned sheets, extracts handwriting transcripts, segments pages, and structures mapped answers into JSON.
+* **Agent 2: Evaluation Node**: Invokes Ollama `gpt-oss:120b-cloud` model to grade answers based on correctness, clarity, relevance, and completeness, producing feedback and grading confidence scores.
 * **Agent 3: Analytics Node**: Compiles overall grades, averages confidence scores, and persists final marks and OCR data into relational tables.
-* *Note: Robust fallback simulators run if Azure/Gemini credentials are not found in the environment.*
+* *Note: Robust fallback simulators run if local Ollama model instance is unreachable.*
 
 ### 4. React Single Page Web Application (`frontend/src/`)
 * **Design Aesthetic**: Premium glassmorphism styles, glowing gradients, rounded corners, custom scrollbars, animated timelines, and dynamic Recharts graphs.

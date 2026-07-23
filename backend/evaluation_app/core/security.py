@@ -13,32 +13,36 @@ ACCESS_TOKEN_EXPIRE_MINUTES = 480  # 8 hours
 # Use a simple salted SHA-256 for password hashing (no external deps required)
 _SALT_PREFIX = "aegis_eval_salt:"
 
+# Create single CryptContext instance at module load time for performance
+try:
+    from passlib.context import CryptContext
+    _pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+except Exception:
+    _pwd_context = None
+
 def get_password_hash(password: str) -> str:
-    """Hash password using SHA-256 with a prefix salt (no bcrypt dependency)."""
-    try:
-        from passlib.context import CryptContext
-        pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
-        return pwd_context.hash(password)
-    except Exception:
-        # Fallback: simple salted sha256
-        salted = _SALT_PREFIX + password
-        return "sha256:" + hashlib.sha256(salted.encode()).hexdigest()
+    """Hash password using bcrypt or SHA-256 fallback."""
+    if _pwd_context:
+        try:
+            return _pwd_context.hash(password)
+        except Exception:
+            pass
+    salted = _SALT_PREFIX + password
+    return "sha256:" + hashlib.sha256(salted.encode()).hexdigest()
 
 def verify_password(plain_password: str, hashed_password: str) -> bool:
     """Verify password against stored hash."""
-    try:
-        # If stored hash starts with "sha256:", use our fallback verifier
-        if hashed_password.startswith("sha256:"):
-            salted = _SALT_PREFIX + plain_password
-            computed = "sha256:" + hashlib.sha256(salted.encode()).hexdigest()
-            return hmac.compare_digest(computed, hashed_password)
-        # Otherwise try passlib/bcrypt
-        from passlib.context import CryptContext
-        pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
-        return pwd_context.verify(plain_password, hashed_password)
-    except Exception:
-        # Last resort: plain compare (only works if hash was stored as plain)
-        return plain_password == hashed_password
+    if hashed_password.startswith("sha256:"):
+        salted = _SALT_PREFIX + plain_password
+        computed = "sha256:" + hashlib.sha256(salted.encode()).hexdigest()
+        return hmac.compare_digest(computed, hashed_password)
+    
+    if _pwd_context:
+        try:
+            return _pwd_context.verify(plain_password, hashed_password)
+        except Exception:
+            pass
+    return plain_password == hashed_password
 
 def create_access_token(subject: Union[str, Any], role: str, expires_delta: int = None) -> str:
     if expires_delta is not None:

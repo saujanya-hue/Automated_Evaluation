@@ -84,18 +84,42 @@ export const FacultyExams: React.FC = () => {
       return;
     }
 
+    // Validate file type for ZIP uploads
+    if (selectedFile.name.toLowerCase().endsWith('.zip')) {
+      showToast('📦 ZIP format: Name sheets by roll number (1.pdf, 2.jpg, 3.png) + include questions.pdf', 'info');
+    }
+
     setUploading(true);
     try {
-      await apiService.uploadAnswerSheets(uploadExamId, selectedFile);
-      showToast('Files uploaded. AI evaluation pipeline triggered in background.', 'success');
+      const response = await apiService.uploadAnswerSheets(uploadExamId, selectedFile);
+      showToast('✅ Files uploaded. AI evaluation pipeline triggered in background.', 'success');
       setShowUploadModal(false);
       setSelectedFile(null);
       fetchExamsAndParams();
       // Redirect to evaluation progress timeline
       navigate('/faculty/progress');
     } catch (err: any) {
-      console.error(err);
-      showToast('Upload failed. Ensure files match ZIP formats.', 'error');
+      console.error('Upload error:', err);
+      
+      // Parse error message for better UX
+      let errorMessage = 'Upload failed. Please try again.';
+      
+      if (err.response?.data?.detail) {
+        const detail = err.response.data.detail;
+        if (detail.includes('No matching files found')) {
+          errorMessage = '❌ No files matched student roll numbers. Ensure answer sheets are named: 1.pdf, 2.pdf, 3.pdf, etc. and include questions.pdf';
+        } else if (detail.includes('Invalid ZIP')) {
+          errorMessage = '❌ Invalid ZIP file. Ensure the file is a valid ZIP archive.';
+        } else if (detail.includes('No students registered')) {
+          errorMessage = '❌ No students are registered in this class. Add students before uploading.';
+        } else {
+          errorMessage = `❌ ${detail}`;
+        }
+      } else if (err.message) {
+        errorMessage = `❌ ${err.message}`;
+      }
+      
+      showToast(errorMessage, 'error');
     } finally {
       setUploading(false);
     }
@@ -139,6 +163,8 @@ export const FacultyExams: React.FC = () => {
                   <span className={`text-[10px] px-2 py-0.5 rounded-md font-bold uppercase tracking-wider ${
                     exam.status === 'completed' 
                       ? 'bg-emerald-950/40 text-emerald-400 border border-emerald-500/20' 
+                      : exam.status === 'evaluated'
+                      ? 'bg-indigo-950/40 text-indigo-400 border border-indigo-500/20'
                       : exam.status === 'evaluating'
                       ? 'bg-amber-950/40 text-amber-400 border border-amber-500/20'
                       : 'bg-secondary/40 text-muted-foreground border border-border'
@@ -323,7 +349,26 @@ export const FacultyExams: React.FC = () => {
                 <span className="text-xs font-bold text-foreground">
                   {selectedFile ? selectedFile.name : 'Select or drag ZIP package'}
                 </span>
-                <span className="text-[10px] text-muted-foreground">PDF, ZIP and docx files allowed.</span>
+                <span className="text-[10px] text-muted-foreground">Supported: ZIP, PDF, JPG, PNG files</span>
+              </div>
+
+              {/* ZIP Format Guide */}
+              <div className="bg-blue-950/20 border border-blue-500/20 rounded-xl p-3 space-y-2">
+                <div className="text-[10px] font-bold text-blue-300 uppercase">📋 ZIP Format Required</div>
+                <div className="text-[10px] text-muted-foreground space-y-1">
+                  <p><strong>1. Name answer sheets by roll number:</strong></p>
+                  <div className="bg-secondary/40 p-2 rounded font-mono text-[9px]">
+                    1.pdf<br/>
+                    2.jpg<br/>
+                    3.png<br/>
+                    4.pdf
+                  </div>
+                  <p><strong>2. Include question paper:</strong></p>
+                  <div className="bg-secondary/40 p-2 rounded font-mono text-[9px]">
+                    questions.pdf (or answer_key.pdf)
+                  </div>
+                  <p className="text-blue-300/80">Questions are used to evaluate answers accurately.</p>
+                </div>
               </div>
 
               <div className="flex justify-end gap-3 pt-3 border-t border-border">

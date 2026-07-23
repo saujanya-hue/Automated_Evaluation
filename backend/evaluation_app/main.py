@@ -1,3 +1,10 @@
+import os
+from dotenv import load_dotenv
+
+# Load .env explicitly so env vars are available even when uvicorn reloads workers
+_BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+load_dotenv(os.path.join(_BASE_DIR, ".env"))
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
@@ -14,9 +21,21 @@ Base.metadata.create_all(bind=engine)
 
 app = FastAPI(
     title="AI-Powered Answer Script Evaluation API",
-    description="Backend service matching university evaluation workflows with LangGraph agents and Gemini 2.5 Flash.",
+    description="Backend service matching university evaluation workflows with LangGraph agents and Ollama (gpt-oss:120b-cloud).",
     version="1.0.0"
 )
+
+@app.on_event("startup")
+def startup_event():
+    db: Session = SessionLocal()
+    try:
+        if db.query(User).count() == 0:
+            print("Database is empty. Auto-seeding default demo data...")
+            seed_database()
+    except Exception as e:
+        print(f"Auto-seeding during startup failed: {e}")
+    finally:
+        db.close()
 
 # CORS configuration for React integration
 app.add_middleware(
@@ -37,7 +56,9 @@ app.include_router(student_api.router, prefix="/api")
 def read_root():
     return {
         "status": "online",
-        "message": "Welcome to the AI Answer Script Evaluation API. Access /docs for swagger specifications."
+        "system": "Automated Answer Script Evaluation Platform",
+        "engine": "Ollama (gpt-oss:120b-cloud)",
+        "version": "1.0.0"
     }
 
 # --- SEED DATA LOADER ---
@@ -57,8 +78,10 @@ def seed_database():
         admin_user = User(email="admin@university.edu", hashed_password=admin_pw, name="Dr. Sarah Jenkins", role="admin")
         faculty_user = User(email="faculty@university.edu", hashed_password=fac_pw, name="Prof. Alan Turing", role="faculty")
         student_user = User(email="student@university.edu", hashed_password=stud_pw, name="John Doe", role="student")
+        student_user_2 = User(email="student2@university.edu", hashed_password=stud_pw, name="Alice Smith", role="student")
+        student_user_3 = User(email="student3@university.edu", hashed_password=stud_pw, name="Bob Jones", role="student")
         
-        db.add_all([admin_user, faculty_user, student_user])
+        db.add_all([admin_user, faculty_user, student_user, student_user_2, student_user_3])
         db.flush()
 
         # 2. Create Departments
@@ -79,10 +102,13 @@ def seed_database():
         db.add_all([oop_sub, dsa_sub])
         db.flush()
 
-        # 5. Create Profiles (Faculty, Student)
+        # 5. Create Profiles (Faculty, Students for roll numbers 1, 2, 3, CS2026045)
         fac_profile = Faculty(user_id=faculty_user.id, employee_id="EMP1024", department_id=cse_dept.id, designation="Associate Professor")
         stud_profile = Student(user_id=student_user.id, roll_number="CS2026045", department_id=cse_dept.id, class_id=cse_class.id)
-        db.add_all([fac_profile, stud_profile])
+        stud_profile_2 = Student(user_id=student_user_2.id, roll_number="1", department_id=cse_dept.id, class_id=cse_class.id)
+        stud_profile_3 = Student(user_id=student_user_3.id, roll_number="2", department_id=cse_dept.id, class_id=cse_class.id)
+        
+        db.add_all([fac_profile, stud_profile, stud_profile_2, stud_profile_3])
         db.flush()
 
         # 6. Assign Faculty to Course
