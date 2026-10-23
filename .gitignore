@@ -30,6 +30,10 @@ build/
 
 # Logs
 *.log
+db_dump.txt
+
+# Uploads
+backend/uploads/
 
 # OS
 .DS_Store

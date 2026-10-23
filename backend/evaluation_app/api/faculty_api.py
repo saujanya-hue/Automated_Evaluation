@@ -192,6 +192,8 @@ def upload_answer_sheets(
                 
                 # Common question paper filenames to look for
                 question_paper_names = [
+                    'qp.pdf', 'qp.jpg', 'qp.png', 'qp.jpeg', 'qp',
+                    'qp_paper.pdf', 'qp_paper.jpg', 'qp_paper.png', 'qp_paper',
                     'questions.pdf', 'questions.jpg', 'questions.png',
                     'question_paper.pdf', 'question_paper.jpg', 'question_paper.png',
                     'answer_key.pdf', 'answer_key.jpg', 'answer_key.png',

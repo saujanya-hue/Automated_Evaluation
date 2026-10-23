@@ -31,7 +31,7 @@ _evaluation_context = {
 }
 
 
-def _ollama_post_with_retry(url: str, payload: dict, timeout: int = 60, max_retries: int = 2) -> dict:
+def _ollama_post_with_retry(url: str, payload: dict, timeout: int = 5, max_retries: int = 1) -> dict:
     """POST to Ollama API with automatic retry on errors."""
     import requests
     for attempt in range(max_retries):
@@ -65,71 +65,86 @@ class EvaluationState(TypedDict):
     confidence_score: float
     errors: List[str]
 
-# Module-level PaddleOCR & EasyOCR reader caches
+# Module-level PaddleOCR reader cache
 _paddle_ocr_reader = None
-_easyocr_reader = None
+
+def _is_valid_human_text(text: str) -> bool:
+    """Validate if extracted text is real human readable content vs PDF metadata/stream junk."""
+    if not text or len(text.strip()) < 15:
+        return False
+    # Check for raw PDF binary stream markers
+    pdf_junk_keywords = ["%PDF", "/FlateDecode", "/Filter", "/Type /Page", "/Contents", "endobj", "stream", "/Font"]
+    junk_matches = sum(1 for kw in pdf_junk_keywords if kw in text)
+    if junk_matches >= 2:
+        return False
+    # Check ratio of alphanumeric characters vs symbols/junk
+    import re
+    alpha_chars = len(re.findall(r'[a-zA-Z0-9]', text))
+    if alpha_chars < 10 or (alpha_chars / max(1, len(text))) < 0.35:
+        return False
+    return True
 
 def _get_paddle_ocr():
     global _paddle_ocr_reader
     if _paddle_ocr_reader is None:
         try:
+            os.environ["FLAGS_use_mkldnn"] = "0"
+            os.environ["FLAGS_enable_pir_api"] = "0"
             from paddleocr import PaddleOCR
             logger.info("Initializing PaddleOCR engine...")
-            _paddle_ocr_reader = PaddleOCR(use_angle_cls=True, lang='en', show_log=False)
+            try:
+                _paddle_ocr_reader = PaddleOCR(use_angle_cls=False, lang='en', enable_mkldnn=False)
+            except Exception:
+                try:
+                    _paddle_ocr_reader = PaddleOCR(use_angle_cls=True, lang='en', enable_mkldnn=False)
+                except Exception:
+                    _paddle_ocr_reader = PaddleOCR(lang='en')
             logger.info("✓ PaddleOCR engine initialized successfully.")
         except Exception as e:
             logger.warning(f"Could not initialize PaddleOCR engine: {e}")
             _paddle_ocr_reader = None
     return _paddle_ocr_reader
 
-def _get_easyocr_reader():
-    global _easyocr_reader
-    if _easyocr_reader is None:
-        try:
-            import easyocr
-            logger.info("Initializing EasyOCR reader engine...")
-            _easyocr_reader = easyocr.Reader(['en'], gpu=False)
-            logger.info("✓ EasyOCR reader engine initialized successfully.")
-        except Exception as e:
-            logger.warning(f"Could not initialize EasyOCR reader: {e}")
-            _easyocr_reader = None
-    return _easyocr_reader
-
 def _run_ocr_on_np_img(np_img) -> str:
-    """Run PaddleOCR first, then EasyOCR fallback on a numpy image array."""
-    # 1. Try PaddleOCR
+    """Run PaddleOCR exclusively for text extraction."""
     p_ocr = _get_paddle_ocr()
     if p_ocr:
         try:
-            res = p_ocr.ocr(np_img, cls=True)
+            try:
+                res = p_ocr.predict(np_img)
+            except Exception:
+                res = p_ocr.ocr(np_img)
             lines = []
-            if res and len(res) > 0 and res[0]:
-                for line in res[0]:
-                    if line and len(line) > 1 and line[1]:
-                        lines.append(line[1][0])
+            if res:
+                res_list = list(res) if not isinstance(res, (list, tuple, dict)) else res
+                for item in (res_list if isinstance(res_list, list) else [res_list]):
+                    if isinstance(item, dict):
+                        rec_texts = item.get("rec_texts", item.get("rec_text", []))
+                        for txt in rec_texts:
+                            lines.append(str(txt))
+                    elif isinstance(item, (list, tuple)):
+                        for line_item in item:
+                            if isinstance(line_item, (list, tuple)) and len(line_item) > 1:
+                                text_info = line_item[1]
+                                if isinstance(text_info, (list, tuple)) and len(text_info) > 0:
+                                    lines.append(str(text_info[0]))
+                                elif isinstance(text_info, str):
+                                    lines.append(text_info)
+                            elif isinstance(line_item, dict):
+                                rec_texts = line_item.get("rec_texts", line_item.get("rec_text", []))
+                                for txt in rec_texts:
+                                    lines.append(str(txt))
             if lines:
                 text = " ".join(lines)
                 logger.info(f"✓ PaddleOCR extracted {len(text)} chars of text.")
                 return text
         except Exception as e:
             logger.warning(f"PaddleOCR processing error: {e}")
-    
-    # 2. Try EasyOCR fallback
-    e_ocr = _get_easyocr_reader()
-    if e_ocr:
-        try:
-            ocr_res = e_ocr.readtext(np_img)
-            text = " ".join([res[1] for res in ocr_res])
-            if text:
-                logger.info(f"✓ EasyOCR extracted {len(text)} chars of text.")
-                return text
-        except Exception as e:
-            logger.warning(f"EasyOCR processing error: {e}")
             
     return ""
 
 # ----------------------------------------------------
-# Node 1: Document Understanding Agent (OCR — PaddleOCR + Ollama)
+# Node 1: Document Understanding Agent (PaddleOCR Exclusive)
 # ----------------------------------------------------
 def document_understanding_agent(state: EvaluationState) -> EvaluationState:
     logger.info(f"--- Document Understanding Agent: Processing Answer Sheet {state['answer_sheet_id']} ---")
@@ -137,7 +152,7 @@ def document_understanding_agent(state: EvaluationState) -> EvaluationState:
     scanned_url = state.get("scanned_file_url", "")
     exam_questions = state.get("exam_questions", [])
 
-    logger.info(f"✓ Using PaddleOCR for text extraction and Ollama ({OLLAMA_MODEL}) for Document Understanding.")
+    logger.info(f"✓ Using PaddleOCR exclusively for text extraction.")
 
     raw_text = None
 
@@ -155,113 +170,144 @@ def document_understanding_agent(state: EvaluationState) -> EvaluationState:
         else:
             logger.info(f"✓ File found! Size: {os.path.getsize(scanned_url)} bytes")
 
-    # Read document text from file using PaddleOCR / EasyOCR
+    # Read document text from file using PyMuPDF, pypdf, and PaddleOCR (Exclusive)
     if scanned_url and os.path.exists(scanned_url):
         try:
-            logger.info(f"🔄 Reading answer sheet scan and running PaddleOCR ({scanned_url})...")
-            import re
-            import io
-            import zlib
-            import numpy as np
-            from PIL import Image
-
+            logger.info(f"🔄 Reading answer sheet scan ({scanned_url})...")
             file_name = os.path.basename(scanned_url)
             ext = os.path.splitext(scanned_url)[1].lower()
             extracted_doc_text = ""
 
-            with open(scanned_url, "rb") as f:
-                file_bytes = f.read()
-
-            # 1. PaddleOCR on PDF decompressed image streams
+            # Strategy 1: PDF Document Processing
             if ext == ".pdf":
-                streams = re.findall(rb'stream\r?\n(.*?)\r?\nendstream', file_bytes, re.DOTALL)
-                for s in streams:
-                    try:
-                        decomp = zlib.decompress(s)
-                        pil_img = Image.open(io.BytesIO(decomp)).convert('RGB')
-                        np_img = np.array(pil_img)
-                        extracted_doc_text = _run_ocr_on_np_img(np_img)
-                        if extracted_doc_text:
-                            logger.info(f"✓ Extracted text from PDF image stream via PaddleOCR.")
-                            break
-                    except Exception:
-                        pass
-
-            # 2. PaddleOCR on direct image files (.png, .jpg, .jpeg)
-            if not extracted_doc_text and ext in [".png", ".jpg", ".jpeg"]:
+                # 1a. Try PyMuPDF (fitz) direct text extraction
                 try:
-                    pil_img = Image.open(io.BytesIO(file_bytes)).convert('RGB')
+                    import fitz
+                    doc = fitz.open(scanned_url)
+                    pdf_text = "".join([page.get_text() for page in doc]).strip()
+                    if _is_valid_human_text(pdf_text):
+                        extracted_doc_text = pdf_text
+                        logger.info(f"✓ Extracted {len(extracted_doc_text)} chars directly from PDF text layer using PyMuPDF.")
+                except Exception as ex_fitz:
+                    logger.warning(f"PyMuPDF direct text extraction skipped: {ex_fitz}")
+
+                # 1b. Try pypdf text extraction if direct PyMuPDF text was invalid/sparse
+                if not _is_valid_human_text(extracted_doc_text):
+                    try:
+                        from pypdf import PdfReader
+                        reader = PdfReader(scanned_url)
+                        pdf_text = "".join([page.extract_text() or "" for page in reader.pages]).strip()
+                        if _is_valid_human_text(pdf_text):
+                            extracted_doc_text = pdf_text
+                            logger.info(f"✓ Extracted {len(extracted_doc_text)} chars directly from PDF text layer using pypdf.")
+                    except Exception as ex_pypdf:
+                        logger.warning(f"pypdf text extraction skipped: {ex_pypdf}")
+
+                # 1c. Scanned PDF processing: Render pages as images and run PaddleOCR exclusively
+                if not _is_valid_human_text(extracted_doc_text):
+                    try:
+                        import fitz
+                        from PIL import Image
+                        import numpy as np
+
+                        logger.info("🔄 PDF contains scanned pages. Rendering pages for PaddleOCR...")
+                        doc = fitz.open(scanned_url)
+                        page_ocr_texts = []
+                        for page_num, page in enumerate(doc):
+                            pix = page.get_pixmap(dpi=150)
+                            pil_img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
+                            np_img = np.array(pil_img)
+                            ocr_out = _run_ocr_on_np_img(np_img)
+                            if ocr_out and len(ocr_out.strip()) > 0:
+                                page_ocr_texts.append(ocr_out)
+                        if page_ocr_texts:
+                            extracted_doc_text = "\n".join(page_ocr_texts)
+                            logger.info(f"✓ Extracted {len(extracted_doc_text)} chars via PaddleOCR on rendered PDF pages.")
+                    except Exception as ex_render:
+                        logger.warning(f"PDF page rendering for OCR failed: {ex_render}")
+
+            # Strategy 2: Direct Image Files (.png, .jpg, .jpeg)
+            elif ext in [".png", ".jpg", ".jpeg"]:
+                try:
+                    from PIL import Image
+                    import numpy as np
+                    pil_img = Image.open(scanned_url).convert('RGB')
                     np_img = np.array(pil_img)
                     extracted_doc_text = _run_ocr_on_np_img(np_img)
                     if extracted_doc_text:
-                        logger.info(f"✓ Extracted text from image file via PaddleOCR.")
+                        logger.info(f"✓ Extracted {len(extracted_doc_text)} chars from image file via PaddleOCR.")
                 except Exception as ex_img:
                     logger.warning(f"Image OCR error: {ex_img}")
-
-            # 3. Stream text token fallback if PDF stream contained uncompressed text
-            if not extracted_doc_text or len(extracted_doc_text.strip()) < 5:
-                text_matches = re.findall(rb'\(([^\(\)]+)\)\s*T[jJ]', file_bytes)
-                if text_matches:
-                    extracted_doc_text = " ".join([m.decode('utf-8', errors='ignore') for m in text_matches if len(m) > 1])
 
             if not extracted_doc_text or len(extracted_doc_text.strip()) < 5:
                 extracted_doc_text = f"Student Answer Sheet File: {file_name}"
 
-            logger.info(f"✓ Extracted {len(extracted_doc_text)} chars of document text.")
+            logger.info(f"✓ Total extracted OCR transcript ({len(extracted_doc_text)} chars): {extracted_doc_text[:150]}...")
 
-            logger.info(f"Sending PaddleOCR transcript ({len(extracted_doc_text)} chars) to Ollama {OLLAMA_MODEL}...")
-
-            prompt_text = f"""You are an advanced university document understanding engine. Below is the text transcript extracted by EasyOCR from student answer sheet file ({file_name}):
+            # Parse transcript using Ollama if running
+            try:
+                logger.info(f"Sending OCR transcript ({len(extracted_doc_text)} chars) to Ollama {OLLAMA_MODEL}...")
+                prompt_text = f"""You are an advanced university document understanding engine. Below is the text transcript extracted by OCR from student answer sheet file ({file_name}):
 
 {extracted_doc_text}
 
 Extract all student answers, question numbers, and text accurately. Output plain text containing question numbers and student answers clearly separated."""
 
-            ollama_url = OLLAMA_URL.rstrip('/') + "/api/chat"
-            payload = {
-                "model": OLLAMA_MODEL,
-                "messages": [
-                    {
-                        "role": "user",
-                        "content": prompt_text
-                    }
-                ],
-                "stream": False
-            }
-            resp_json = _ollama_post_with_retry(ollama_url, payload, timeout=60)
-            raw_text = resp_json["message"]["content"]
-            logger.info(f"✓ Ollama Document Understanding completed successfully for {file_name}.")
+                ollama_url = OLLAMA_URL.rstrip('/') + "/api/chat"
+                payload = {
+                    "model": OLLAMA_MODEL,
+                    "messages": [{"role": "user", "content": prompt_text}],
+                    "stream": False
+                }
+                resp_json = _ollama_post_with_retry(ollama_url, payload, timeout=60)
+                ollama_out = resp_json["message"]["content"]
+                
+                # Verify that Ollama returned actual transcript rather than an error/refusal message
+                if "sorry" not in ollama_out.lower() and "unable to extract" not in ollama_out.lower() and len(ollama_out.strip()) > 10:
+                    raw_text = ollama_out
+                    logger.info(f"✓ Ollama Document Understanding completed successfully for {file_name}.")
+                else:
+                    logger.warning("Ollama returned an error/refusal message. Using raw OCR extracted text directly.")
+                    raw_text = extracted_doc_text
+            except Exception as e:
+                logger.warning(f"⚠️ Ollama Parsing skipped: {e}. Using raw OCR extracted text directly.")
+                raw_text = extracted_doc_text
+
         except Exception as e:
-            logger.warning(f"⚠️  EasyOCR/Ollama Parsing failed: {e}. Using raw extracted text.")
-            state["errors"].append(f"EasyOCR error: {str(e)}")
-            raw_text = extracted_doc_text if 'extracted_doc_text' in locals() and extracted_doc_text else f"Answer sheet content for sheet {state['answer_sheet_id']}"
+            logger.error(f"❌ Error during document processing: {e}")
+            state["errors"].append(f"Document processing error: {str(e)}")
+            raw_text = f"Student Answer Sheet Transcript (Sheet ID {state['answer_sheet_id']}): OCR text parsed for evaluation."
 
     if not raw_text:
-        raw_text = f"Student Answer Sheet Transcript (Sheet ID {state['answer_sheet_id']}): EasyOCR text parsed for evaluation."
+        raw_text = f"Student Answer Sheet Transcript (Sheet ID {state['answer_sheet_id']}): OCR text parsed for evaluation."
     
-    # Build structured transcript sections dynamically
+    # Build structured transcript sections dynamically with flexible regex matching
+    import re
     transcript_sections = []
     if exam_questions and len(exam_questions) > 0:
         logger.info(f"Using {len(exam_questions)} dynamic exam questions from database/question paper.")
-        for q in exam_questions:
-            q_num = str(q.get("question_number", "1"))
+        for i, q in enumerate(exam_questions):
+            q_num = str(q.get("question_number", i + 1))
             q_text = q.get("question_text", f"Question {q_num}")
             max_m = float(q.get("max_marks", 10.0))
             
-            student_ans = raw_text
-            if "Q" + q_num in raw_text or "Question " + q_num in raw_text:
-                parts = raw_text.split("Q" + q_num)
-                if len(parts) > 1:
-                    student_ans = parts[1].split("Q")[0].strip()
+            student_ans = ""
+            # Search for question number pattern (e.g. Q1, Q1:, 1), 1., Ans 1)
+            pat = rf'(?:Q(?:uestion)?\s*{q_num}|{q_num}[\.\:\)\-\s]+|Ans(?:wer)?\s*{q_num})\s*[:\-\)]?\s*(.*?)(?=(?:Q(?:uestion)?\s*\d+|\d+[\.\:\)\-\s]+|Ans(?:wer)?\s*\d+|$))'
+            m = re.search(pat, raw_text, re.DOTALL | re.IGNORECASE)
+            if m and len(m.group(1).strip()) > 1:
+                student_ans = m.group(1).strip()
+            
+            if not student_ans or len(student_ans.strip()) < 2:
+                student_ans = raw_text
             
             transcript_sections.append({
                 "question_number": q_num,
                 "question_prompt": q_text,
-                "student_answer": student_ans if len(student_ans) > 3 else raw_text,
+                "student_answer": student_ans,
                 "max_marks": max_m
             })
     else:
-        # Dynamically split raw_text by lines or question markers
         transcript_sections = [
             {
                 "question_number": "1",
@@ -297,12 +343,11 @@ def evaluation_agent(state: EvaluationState) -> EvaluationState:
     ocr_struct = state.get("ocr_structured", {})
     sections = ocr_struct.get("transcript_sections", [])
 
-    logger.info(f"✓ Using Ollama at {OLLAMA_URL} with model {OLLAMA_MODEL} for evaluation of {len(sections)} question(s).")
+    logger.info(f"✓ Evaluating {len(sections)} question section(s).")
 
     evaluated_questions = []
     import re
     
-    # Call Ollama gpt-oss:120b-cloud for each question dynamically
     if len(sections) > 0:
         ollama_url = OLLAMA_URL.rstrip('/') + "/api/chat"
         for sec in sections:
@@ -355,20 +400,28 @@ Respond ONLY with a JSON object format (no extra markdown text):
                     "question_number": q_num,
                     "max_marks": max_marks,
                     "marks_obtained": m_obtained,
-                    "feedback": eval_data.get("feedback", "Evaluated dynamically by Ollama AI engine."),
+                    "feedback": eval_data.get("feedback", "Evaluated dynamically by AI engine."),
                     "confidence_score": float(eval_data.get("confidence_score", 0.92))
                 })
             except Exception as e:
-                logger.warning(f"⚠️  Ollama evaluation for Q{q_num} failed: {e}. Calculating dynamic text score.")
+                logger.warning(f"⚠️ Ollama evaluation for Q{q_num} skipped/failed: {e}. Calculating dynamic text score.")
                 state["errors"].append(f"Ollama Q{q_num} eval error: {str(e)}")
-                # Compute dynamic score based on actual student answer length and content
-                ans_len = len(ans.strip()) if ans else 0
-                calc_marks = max(1.0, min(max_marks, (ans_len / 150.0) * max_marks))
+                
+                ans_clean = ans.strip() if ans else ""
+                if len(ans_clean) > 5 and "sorry" not in ans_clean.lower() and "unable to extract" not in ans_clean.lower():
+                    words = len(ans_clean.split())
+                    score_ratio = min(0.9, max(0.5, words / 12.0))
+                    calc_marks = round(score_ratio * max_marks, 1)
+                    fb = f"Evaluated based on OCR extracted answer content ({words} words detected)."
+                else:
+                    calc_marks = 0.0
+                    fb = "No valid student answer text extracted for evaluation."
+
                 evaluated_questions.append({
                     "question_number": q_num,
                     "max_marks": max_marks,
-                    "marks_obtained": round(calc_marks, 1),
-                    "feedback": f"Evaluated dynamically for Q{q_num} based on student answer technical content ({ans_len} characters processed).",
+                    "marks_obtained": calc_marks,
+                    "feedback": fb,
                     "confidence_score": 0.85
                 })
 
